@@ -2,7 +2,7 @@
 /***************************************************************
 *  Copyright notice
 *
-*  (c) 2001-2005 Kasper Skårhøj <kasper@typo3.org>
+*  (c) 2001-2006 Kasper Skï¿½hj <kasper@typo3.org>
 *      			 Robert Lemke <robert@typo3.org>
 *  All rights reserved
 *
@@ -30,7 +30,7 @@
  *
  * Refactored for TER 2.0, July 2005
  *
- * @author	Kasper Skårhøj <kasper@typo3.com>
+ * @author	Kasper Skï¿½hj <kasper@typo3.com>
  * @author	Robert Lemke <robert@typo3.org>
  */
 
@@ -45,14 +45,20 @@
  */
 
 require_once(PATH_tslib.'class.tslib_pibase.php');
-require_once(t3lib_extMgm::extPath('ter').'class.tx_ter_api.php');
+
+if (t3lib_extMgm::isLoaded('ter')) {	
+	require_once(t3lib_extMgm::extPath('ter').'class.tx_ter_helper.php');
+	require_once(t3lib_extMgm::extPath('ter').'class.tx_ter_api.php');	
+}
+
+
 
 /**
  * TYPO3 Extension Repository, frontend plugin for delivery of extensions from repository.
  * Base class for extrep_mgm class as well (frontend management functions)
  * See other extension (extrep_mgm) for all the management functions, documentation hub, translations etc.
  *
- * @author	Kasper Skï¿½rhï¿½j <kasper@typo3.com>
+ * @author	Kasper Skï¿½hj <kasper@typo3.com>
  * @package TYPO3
  * @subpackage tx_extrep
  */
@@ -132,13 +138,14 @@ class tx_extrep extends tslib_pibase {
 	 */
 	function main($content,$conf)	{
 
-		$this->WSDLURI = t3lib_div::getIndpEnv('TYPO3_SITE_URL').t3lib_extMgm::siteRelPath('ter').'tx_ter.wsdl';
+		$this->WSDLURI = t3lib_div::getIndpEnv('TYPO3_SITE_URL').'wsdl/tx_ter_wsdl.php';
 		$this->SOAPServiceURI = t3lib_div::getIndpEnv('TYPO3_SITE_URL').'index.php?id=ter';
 		$this->repositoryDir = PATH_site.'fileadmin/ter/';
 
 		$this->getPIdata();
 
-		$this->dbPageId = intval($this->cObj->data['pages']);
+		$this->dbPageId = 1320;
+
 		if ($this->dbPageId<=0)	{
 			$content='<p>You must add a reference to a page (called "Starting point") in the "Insert Plugin" content element. That page should be where Frontend Users and all repository records are stored.</p>';
 		} else {
@@ -258,7 +265,7 @@ class tx_extrep extends tslib_pibase {
 		global $TYPO3_DB;
 
 		$outArr = array();
-		$outArr['_MESSAGES'][]='Welcome pilgrim, you are proudly served by the TYPO3 Extension Repository Version 2.0!';
+		$outArr['_MESSAGES'][]='Welcome pilgrim, you are proudly served by the TYPO3 Extension Repository version 2.0!';
 		$outArr['_MESSAGES'][]=' ';
 
 			// Fetch requested extension record:
@@ -311,10 +318,39 @@ class tx_extrep extends tslib_pibase {
 
 				// Add most recent translation?
 			if ($this->piData['transl']) {
-				$outArr['_MESSAGES'][] = 'Sorry, most recent translation cannot be added, please upgrade to a TER 2.0 compatible Extension Manager as soon as it is available.';
+				$outArr['_MESSAGES'][] = 'Sorry, most recent translation cannot be added, please upgrade to a TER 2.0 compatible Extension Manager.';
 			}
-			
-			# FIXME: increase DL counter
+
+				// Increase download counter (manually).
+				// NOTE: The new value won't be visible until the extensions.xml.gz is updated by any other action of the true TER2 API. But we accept that.
+
+			$newCounter = intval($row['downloadcounter']) + 1;
+			$res = $TYPO3_DB->exec_UPDATEquery (
+				'tx_ter_extensions', 
+				'uid='.$row['uid'],
+				array('downloadcounter' => $newCounter)
+			);
+
+			$res = $TYPO3_DB->exec_SELECTquery (
+				'uid,downloadcounter',
+				'tx_ter_extensionkeys', 
+				'extensionkey='.$TYPO3_DB->fullQuoteStr($row['extension_key'],' tx_ter_extensionkeys')
+			);
+			if ($res) {
+				$extensionKeyRow = $TYPO3_DB->sql_fetch_assoc($res);
+				if (is_array ($extensionKeyRow)) {
+					$newTotalCounter = intval($extensionKeyRow['downloadcounter']) + 1;
+					$res = $TYPO3_DB->exec_UPDATEquery (
+						'tx_ter_extensionkeys', 
+						'uid='.$extensionKeyRow['uid'],
+						array('downloadcounter' => $newTotalCounter)
+					);						
+				}	
+			}
+
+			// These lines would be neccessary to update the extensions.xml.gz file. But they would generate quite some load on the server!
+			//			$helperObj = new tx_ter_helper ($this);
+			//			$helperObj->writeExtensionIndexFile();
 
 			$outArr['_MESSAGES'][]='Extension download was successful!';
 			
@@ -461,13 +497,134 @@ class tx_extrep extends tslib_pibase {
 					'extensionKey' => 'typo3',
 					'versionRange' => $decodedData['EM_CONF']['TYPO3_version'],
 				);
+		}		
+
+		if (t3lib_extMgm::isLoaded('ter'))  {
+			return $this->handleUpload_directly($decodedData, $dependenciesArr, $versionArr);			
+		} else { 
+			return $this->handleUpload_soap($decodedData, $dependenciesArr, $versionArr);
 		}
+	}
+
+	/**
+	 * Subfunction of handleUpload() - uploads an extension to TER by writing
+	 * the data directly into the database. Only works if the extension "ter"
+	 * is also installed and the repository is truly in the same installation.
+	 * 
+	 * @param		array		$decodedData: The decoded POST data from handleUpload() 
+	 * @param		array		$dependenciesArr: The prepared TER2 compatible constraints
+	 * @return		string		HTML error message
+	 */
+	function handleUpload_directly($decodedData, $dependenciesArr, $versionArr) {
+		
+			// Create objects for calling the uploadFunction in the TER API directly:			
+		$accountData = new STDCLASS;
+		$accountData->username = utf8_encode (trim ($this->piData['user']['fe_u']));
+		$accountData->password = utf8_encode (trim ($this->piData['user']['fe_p']));
+		
+		$extensionInfoData = new STDCLASS;
+		$extensionInfoData->extensionKey = utf8_encode ($decodedData['extKey']);
+		$extensionInfoData->version = utf8_encode ($versionArr['version']);
+		
+		$extensionInfoData->metaData = new STDCLASS;		
+		$extensionInfoData->metaData->title = utf8_encode ($decodedData['EM_CONF']['title']);
+		$extensionInfoData->metaData->description = utf8_encode ($decodedData['EM_CONF']['description']);
+		$extensionInfoData->metaData->category = utf8_encode ($decodedData['EM_CONF']['category']);
+		$extensionInfoData->metaData->state = utf8_encode ($decodedData['EM_CONF']['state']);
+		$extensionInfoData->metaData->authorName = utf8_encode ($decodedData['EM_CONF']['author']);
+		$extensionInfoData->metaData->authorEmail = utf8_encode ($decodedData['EM_CONF']['author_email']);
+		$extensionInfoData->metaData->authorCompany = utf8_encode ($decodedData['EM_CONF']['author_company']);
+
+		$extensionInfoData->technicalData = new STDCLASS;
+		$extensionInfoData->technicalData->dependencies = $dependenciesArr;
+		$extensionInfoData->technicalData->loadOrder = utf8_encode ($decodedData['EM_CONF']['loadOrder']);
+		$extensionInfoData->technicalData->uploadFolder = utf8_encode ($decodedData['EM_CONF']['uploadfolder']);
+		$extensionInfoData->technicalData->createDirs = utf8_encode ($decodedData['EM_CONF']['createDirs']);
+		$extensionInfoData->technicalData->shy = utf8_encode ($decodedData['EM_CONF']['shy']);
+		$extensionInfoData->technicalData->modules = utf8_encode ($decodedData['EM_CONF']['module']);
+		$extensionInfoData->technicalData->modifyTables = utf8_encode ($decodedData['EM_CONF']['modify_tables']);
+		$extensionInfoData->technicalData->priority = utf8_encode ($decodedData['EM_CONF']['priority']);
+		$extensionInfoData->technicalData->clearCacheOnLoad = utf8_encode ($decodedData['EM_CONF']['clearCacheOnLoad']);
+		$extensionInfoData->technicalData->lockType = utf8_encode ($decodedData['EM_CONF']['lockType']);
+
+		$extensionInfoData->infoData = new STDCLASS;
+		$extensionInfoData->infoData->codeLines = intval($decodedData['misc']['codelines']);
+		$extensionInfoData->infoData->codeBytes = intval($decodedData['misc']['codebytes']);
+		$extensionInfoData->infoData->codingGuidelinesCompliance = utf8_encode ($decodedData['EM_CONF']['CGLcompliance']);
+		$extensionInfoData->infoData->codingGuidelinesComplianceNotes = utf8_encode ($decodedData['EM_CONF']['CGLcompliance_note']);
+		$extensionInfoData->infoData->uploadComment = utf8_encode ($this->piData['upload']['comment']);
+		$extensionInfoData->infoData->techInfo = unserialize ($decodedData['techInfo']);
+
+		$filesData = new STDCLASS;
+		$filesData->fileData = array();
+		foreach ($decodedData['FILES'] as $filename => $infoArr) {
+			$fileData = new STDCLASS;
+			$fileData->name = utf8_encode ($infoArr['name']); 
+			$fileData->size = intval($infoArr['size']); 
+			$fileData->modificationTime = intval($infoArr['mtime']);
+			$fileData->isExecutable = intval($infoArr['is_executable']); 
+			$fileData->content = base64_encode($infoArr['content']);
+			$fileData->contentMD5 = md5($infoArr['content']);
+			
+			$filesData->fileData[] = $fileData;
+		}
+
+			// Set variable $this->extensionsPID because the tx_ter_helper class expects that to get from the pluginObj (which is $this in our case):
+		$this->extensionsPID = $this->dbPageId;
+	
+		$terAPIObj = new tx_ter_api($this);
+		try {
+			$result = $terAPIObj->uploadExtension (
+				$accountData,
+				$extensionInfoData,
+				$filesData
+			);
+		} catch (SoapFault $exception) {
+			return
+				'<strong>Upload was not successful!</strong><br />
+				<p>The TER2 SOAP server throwed an exception (<em>'.$exception->faultcode.': '.$exception->faultstring.'</em>). 
+				If that seems to be an error, please post a bug report at bugs.typo3.org and mention this error code and description.
+			';				
+		}
+
+			// Create EM conf array which is delivered back to the EM:
+		$backEM_CONF = $decodedData['EM_CONF'];
+		$backEM_CONF['version'] = $result['version'];
+
+			// Print info content for Extension Manager frame:
+		$content.="
+			The extension '".$decodedData['EM_CONF']['title']."' (".$decodedData['extKey'].') version <strong>'.$result['version'].'</strong> was inserted into the repository.<br />
+			<br />
+			Please finish the upload process by pressing this button to return to your servers Extensions Manager and update the configuration.
+			<br />
+			<br />
+			<form action="'.htmlspecialchars($this->piData['upload']['returnUrl']).'" method="post">
+				<input type="hidden" name="TER_CMD[returnValue]" value="'.htmlspecialchars($this->compileOutputData($backEM_CONF)).'" />
+				<input type="hidden" name="TER_CMD[extKey]" value="'.htmlspecialchars($decodedData['extKey']).'" />
+				<input type="hidden" name="TER_CMD[cmd]" value="EM_CONF" />
+				<input type="submit" name="TER_CMD[update]" value="Syncronize EM" />
+			</form>
+			<br />
+			<span style="font-size: 10px;">TER 2.0 (direct mode)</span>
+		';
+		return $content;
+	}
+
+	/**
+	 * Subfunction of handleUpload() - uploads an extension to TER by using the
+	 * SOAP interface of the extension "ter". You have to use this if the repository
+	 * is not located in this TYPO3 installation.
+	 *
+	 * @param		array		$decodedData: The decoded POST data from handleUpload() 
+	 * @param		array		$dependenciesArr: The prepared TER2 compatible constraints
+	 * @return		string		HTML error message
+	 */
+	function handleUpload_soap($decodedData, $dependenciesArr, $versionArr) {
 
 			// Compile data for SOAP call:
 		$accountData = array (
 			'username' => utf8_encode (trim ($this->piData['user']['fe_u'])),
-			'password' => utf8_encode (trim ($this->piData['user']['fe_p'])),
-			'uploadPassword' => utf8_encode ($this->piData['upload']['upload_p']),
+			'password' => utf8_encode (trim ($this->piData['user']['fe_p']))
 		);
 		$extensionInfoData = array (
 			'extensionKey' => utf8_encode ($decodedData['extKey']),
@@ -505,18 +662,18 @@ class tx_extrep extends tslib_pibase {
 
 		$filesData = array();
 		foreach ($decodedData['FILES'] as $filename => $infoArr) {
-			$filesData[] = array (
+			$filesData['fileData'][] = array (
 				'name' => utf8_encode ($infoArr['name']),
 				'size' => intval($infoArr['size']),
 				'modificationTime' => intval($infoArr['mtime']),
 				'isExecutable' => intval($infoArr['is_executable']),
 				'content' => base64_encode($infoArr['content']),
-				'contentMD5' => $infoArr['content_md5'],
+				'contentMD5' => md5($infoArr['content']),
 			);
 		}
 
 			// Upload extension via SOAP:
-		$soapClientObj = new SoapClient ($this->WSDLURI, array ('exceptions' => 1));
+		$soapClientObj = new SoapClient ($this->WSDLURI, array ('trace' => 1, 'exceptions' => 1, 'soap_version'  => SOAP_1_2));
 		try {
 			$soapResult = $soapClientObj->uploadExtension (
 				$accountData,
@@ -524,7 +681,22 @@ class tx_extrep extends tslib_pibase {
 				$filesData
 			);
 		} catch (SoapFault $exception) {
-			return $this->pError('Error #'.$exception->faultcode.': '.$exception->faultstring);
+			return
+				'<strong>Upload was not successful!</strong>
+				<p>The TER2 SOAP server throwed an exception (<em>'.$exception->faultcode.': '.$exception->faultstring.'</em>). Please
+				visit the teams.typo3.typo3org newsgroup to check if this is a known problem. Otherwise, please report it to our
+				bugtracker at <a href="http://bugs.typo3.org" target="_new">bugs.typo3.org</a> and before you do, make sure a similar
+				report doesn\'t exist already.</p>
+				<p>Sorry for the inconvenience.</p>
+				<em>Request:</em><br />
+				<pre>' .
+					$soapClientObj->__getLastRequestHeaders().'
+				</pre>
+				<em>Response:</em><br />
+				<pre>'.
+					$soapClientObj->__getLastResponseHeaders().
+				'</pre>'.
+				htmlspecialchars($soapClientObj->__getLastResponse());
 		}
 
 			// Create EM conf array which is delivered back to the EM:
@@ -545,9 +717,8 @@ class tx_extrep extends tslib_pibase {
 				<input type="submit" name="TER_CMD[update]" value="Syncronize EM" />
 			</form>
 			<br />
-			<span style="font-size: 10px;">TER 2.0</span>
+			<span style="font-size: 10px;">TER 2.0 (SOAP mode)</span>
 		';
-
 		return $content;
 	}
 
